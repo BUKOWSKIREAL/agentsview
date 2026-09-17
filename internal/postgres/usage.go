@@ -46,24 +46,6 @@ const pgUsageEventSourceEligibility = `
 
 const pgUsageSessionEligibility = `s.deleted_at IS NULL`
 
-// pgDevinScopedMessageSourceUUID translates a stored bare Devin node/step
-// uuid into the session-scoped form the parser now emits ("devin:<raw>"
-// session ids scope "<raw>:<id>"), so usage dedup keys match the SQLite
-// fill-side translation even for rows pushed by an older binary. Remote
-// sessions carry a "host~devin:<raw>" id; host names cannot contain '~' or
-// ':', so strpos(m.session_id, 'devin:') unambiguously locates the prefix
-// after an optional 'host~'. Every other value passes through untouched.
-// strpos predicates stand in for LIKE patterns so the fragment can embed
-// in fmt.Sprintf templates without percent escapes.
-const pgDevinScopedMessageSourceUUID = `CASE
-	WHEN (strpos(m.session_id, 'devin:') = 1
-		OR strpos(m.session_id, '~devin:') > 0)
-		AND m.source_uuid != '' AND strpos(m.source_uuid, ':') = 0
-	THEN substr(m.session_id, strpos(m.session_id, 'devin:') + 6) ||
-		':' || m.source_uuid
-	ELSE m.source_uuid
-END`
-
 func usageLocation(f db.UsageFilter) *time.Location {
 	if f.Timezone == "" {
 		return time.Local
@@ -262,7 +244,7 @@ SELECT
 	'' AS cost_source,
 	m.claude_message_id,
 	m.claude_request_id,
-	` + pgDevinScopedMessageSourceUUID + ` AS source_uuid,
+	m.source_uuid,
 	'' AS usage_dedup_key,
 	s.project,
 	s.agent,
@@ -343,7 +325,7 @@ SELECT
 	'' AS cost_source,
 	m.claude_message_id,
 	m.claude_request_id,
-	` + pgDevinScopedMessageSourceUUID + ` AS source_uuid,
+	m.source_uuid,
 	'' AS usage_dedup_key,
 	s.project,
 	s.agent,
@@ -403,7 +385,7 @@ SELECT
 	'' AS cost_source,
 	m.claude_message_id,
 	m.claude_request_id,
-	` + pgDevinScopedMessageSourceUUID + ` AS source_uuid,
+	m.source_uuid,
 	'' AS usage_dedup_key,
 	s.project,
 	s.agent,

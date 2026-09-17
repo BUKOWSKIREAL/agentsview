@@ -414,7 +414,7 @@ const usageEventSourceEligibility = `
 
 const usageSessionEligibility = `s.deleted_at IS NULL`
 
-var usageRowsSQLTemplate = `
+const usageRowsSQLTemplate = `
 SELECT
 	m.session_id,
 	m.ordinal AS message_ordinal,
@@ -437,8 +437,7 @@ SELECT
 	'' AS cost_source,
 	m.claude_message_id,
 	m.claude_request_id,
-	` + devinScopedSourceUUIDSQL(
-	"m.source_uuid", "m.session_id") + ` AS source_uuid,
+	m.source_uuid,
 	'' AS usage_dedup_key,
 	s.project,
 	s.agent,
@@ -502,7 +501,7 @@ func usageRowsSQLWithWhere(
 	)
 }
 
-var dailyUsageRowsSQLTemplate = `
+const dailyUsageRowsSQLTemplate = `
 SELECT
 	m.session_id,
 	m.ordinal AS message_ordinal,
@@ -524,8 +523,7 @@ SELECT
 	'' AS cost_source,
 	m.claude_message_id,
 	m.claude_request_id,
-	` + devinScopedSourceUUIDSQL(
-	"m.source_uuid", "m.session_id") + ` AS source_uuid,
+	m.source_uuid,
 	'' AS usage_dedup_key,
 	s.project,
 	s.agent,
@@ -566,7 +564,7 @@ FROM usage_events ue
 JOIN sessions s ON s.id = ue.session_id
 WHERE %s`
 
-var dailyUsageMessageRowsSQLTemplate = `
+const dailyUsageMessageRowsSQLTemplate = `
 SELECT
 	m.session_id,
 	m.ordinal AS message_ordinal,
@@ -588,8 +586,7 @@ SELECT
 	'' AS cost_source,
 	m.claude_message_id,
 	m.claude_request_id,
-	` + devinScopedSourceUUIDSQL(
-	"m.source_uuid", "m.session_id") + ` AS source_uuid,
+	m.source_uuid,
 	'' AS usage_dedup_key,
 	s.project,
 	s.agent,
@@ -656,8 +653,7 @@ message_timestamp_rows AS MATERIALIZED (
 		m.token_usage,
 		m.claude_message_id,
 		m.claude_request_id,
-		` + devinScopedSourceUUIDSQL(
-		"m.source_uuid", "m.session_id") + ` AS source_uuid
+		m.source_uuid
 	FROM messages m
 	WHERE ` + messageTimestampWhere + `
 ),

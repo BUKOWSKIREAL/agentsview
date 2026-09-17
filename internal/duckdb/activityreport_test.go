@@ -1137,67 +1137,6 @@ func TestDuckGetActivityReportUsageDedupFallsBackToSourceUUID(t *testing.T) {
 		"incomplete Claude pairs fall back to source_uuid dedup in activity reports")
 }
 
-// TestDuckUsageReportsScopeLegacyDevinSourceUUIDs covers mirror rows pushed
-// from an archive that predates Devin source-uuid scoping (data version
-// 110): bare node/step ids are unique only within their own session. The
-// usage projections must emit the session-scoped "<raw>:<id>" identity the
-// parser now produces, so two Devin sessions sharing bare uuid "2" report
-// distinct usage rows instead of deduplicating into one — under local
-// "devin:<raw>" and remote "host~devin:<raw>" session ids alike — while a
-// non-Devin session keeps its bare uuid. Mirrors the SQLite
-// TestUsageReportsScopeLegacyDevinSourceUUIDs.
-func TestDuckUsageReportsScopeLegacyDevinSourceUUIDs(t *testing.T) {
-	ctx := context.Background()
-	sessIDs := []string{
-		"devin:sess-a", "host~devin:sess-b", "host~other:sess-c",
-	}
-	agents := map[string]string{
-		"devin:sess-a":      "devin",
-		"host~devin:sess-b": "devin",
-		"host~other:sess-c": "other",
-	}
-	writes := make([]db.SessionBatchWrite, 0, len(sessIDs))
-	for _, id := range sessIDs {
-		sess := syncSession(id, "proj", "first", "2026-08-10T08:00:00Z", 1)
-		sess.Agent = agents[id]
-		msg := syncMessage(id, 0, "assistant", "x", "2026-08-10T09:00:00Z")
-		msg.Model = "devin-model"
-		msg.SourceUUID = "2"
-		msg.TokenUsage = jsontext.Value(
-			`{"input_tokens":2,"output_tokens":3}`)
-		msg.OutputTokens = 3
-		writes = append(writes, db.SessionBatchWrite{
-			Session:         sess,
-			Messages:        []db.Message{msg},
-			DataVersion:     1,
-			ReplaceMessages: true,
-		})
-	}
-	store := activityReportStore(t, writes, nil)
-
-	rowSet, err := store.GetSessionUsageRows(ctx, sessIDs)
-	require.NoError(t, err)
-	require.Len(t, rowSet.Rows, 3,
-		"sessions sharing a bare Devin uuid must not deduplicate into one row")
-	sourceUUIDBySession := make(map[string]string)
-	for _, row := range rowSet.Rows {
-		sourceUUIDBySession[row.SourceSessionID] = row.SourceUUID
-	}
-	assert.Equal(t, "sess-a:2", sourceUUIDBySession["devin:sess-a"],
-		"bare Devin uuid must project in session-scoped form")
-	assert.Equal(t, "sess-b:2", sourceUUIDBySession["host~devin:sess-b"],
-		"host-prefixed Devin uuid must scope to the raw session id")
-	assert.Equal(t, "2", sourceUUIDBySession["host~other:sess-c"],
-		"non-Devin uuid must pass through unchanged")
-
-	r, err := store.GetActivityReport(
-		ctx, db.AnalyticsFilter{Timezone: "UTC"},
-		duckDayQuery(t, "2026-08-10", "UTC"))
-	require.NoError(t, err)
-	assert.Equal(t, 9, r.Totals.OutputTokens,
-		"activity report must total output across all three sessions")
-}
-
 // TestDuckGetActivityReportZeroCostKeepsPrimaryModel confirms a usage-only
 // (untimed) session whose known-model usage carries zero cost still reports
 // that model as primary through the DuckDB path, guarding the shared zero-cost

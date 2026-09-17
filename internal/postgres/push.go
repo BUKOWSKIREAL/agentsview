@@ -21,7 +21,6 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/jsonutil"
-	"go.kenn.io/agentsview/internal/parser"
 )
 
 const (
@@ -3300,22 +3299,6 @@ func restorePinnedMessages(
 	return nil
 }
 
-// legacyDevinScopedSourceUUID returns the session-scoped form of a bare
-// Devin source uuid stored by a pre-110 archive: bare Devin node/step ids
-// are only unique per session, and the parser now scopes them as
-// "<raw>:<id>" for "devin:<raw>" session ids (data version 110), including
-// under a remote "host~devin:<raw>" id. A pin snapshotted against the
-// legacy rows names the bare form, so resolution must accept both.
-func legacyDevinScopedSourceUUID(sessionID, uuid string) (string, bool) {
-	_, rawID := parser.StripHostPrefix(sessionID)
-	if !strings.HasPrefix(rawID, "devin:") ||
-		uuid == "" ||
-		strings.Contains(uuid, ":") {
-		return "", false
-	}
-	return strings.TrimPrefix(rawID, "devin:") + ":" + uuid, true
-}
-
 func resolvePinnedMessageTarget(
 	ctx context.Context, tx *sql.Tx, sessionID string,
 	pin savedPostgresPin,
@@ -3324,36 +3307,20 @@ func resolvePinnedMessageTarget(
 		return 0, "", false, nil
 	}
 	if pin.sourceUUID != "" {
-		// The stored uuid is matched alongside its session-scoped
-		// form so a pin saved against a bare Devin node/step id
-		// re-attaches after the re-parse restamps rows. Passing the
-		// raw value twice when no scoped form applies keeps the
-		// query shape static. Every uniqueness and multiplicity
-		// count below measures the COMBINED {bare, scoped}
-		// candidate set, not just the form one candidate row
-		// carries: if a bare and a scoped row ever coexist, each
-		// per-row count would look unique and the pin would attach
-		// to whichever row the scan returned first.
-		scopedUUID := pin.sourceUUID
-		if scoped, ok := legacyDevinScopedSourceUUID(
-			sessionID, pin.sourceUUID,
-		); ok {
-			scopedUUID = scoped
-		}
 		if pin.sourceUUIDCount == 1 {
 			target, sourceUUID, ok, err := scanPinnedMessageTarget(
 				tx.QueryRowContext(ctx, `
 					SELECT m.ordinal, m.source_uuid
 					FROM messages m
 					WHERE m.session_id = $1
-						AND m.source_uuid IN ($2, $3)
+						AND m.source_uuid = $2
 						AND (
 							SELECT COUNT(*)
 							FROM messages same_uuid
 							WHERE same_uuid.session_id = m.session_id
-								AND same_uuid.source_uuid IN ($2, $3)
+								AND same_uuid.source_uuid = m.source_uuid
 						) = 1`,
-					sessionID, pin.sourceUUID, scopedUUID,
+					sessionID, pin.sourceUUID,
 				),
 			)
 			if err != nil {
@@ -3373,37 +3340,33 @@ func resolvePinnedMessageTarget(
 		// pinned occurrence across shifts caused by rows inserted
 		// before the group. A different count means duplicates were
 		// inserted or removed and the rank no longer identifies an
-		// occurrence, so the pin is dropped. Both counts measure the
-		// combined {bare, scoped} candidate set for the reason given
-		// above: coexisting forms inflate the group past the saved
-		// multiplicity, so the pin drops instead of attaching to an
-		// arbitrary row.
+		// occurrence, so the pin is dropped.
 		target, sourceUUID, ok, err := scanPinnedMessageTarget(
 			tx.QueryRowContext(ctx, `
 				SELECT m.ordinal, m.source_uuid
 				FROM messages m
 				WHERE m.session_id = $1
-					AND m.source_uuid IN ($2, $3)
-					AND m.role = $4
-					AND m.content = $5
+					AND m.source_uuid = $2
+					AND m.role = $3
+					AND m.content = $4
 					AND (
 						SELECT COUNT(*)
 						FROM messages same_identity
 						WHERE same_identity.session_id = m.session_id
-							AND same_identity.source_uuid IN ($2, $3)
+							AND same_identity.source_uuid = m.source_uuid
 							AND same_identity.role = m.role
 							AND same_identity.content = m.content
-					) = $6
+					) = $5
 					AND (
 						SELECT COUNT(*)
 						FROM messages identity_rank
 						WHERE identity_rank.session_id = m.session_id
-							AND identity_rank.source_uuid IN ($2, $3)
+							AND identity_rank.source_uuid = m.source_uuid
 							AND identity_rank.role = m.role
 							AND identity_rank.content = m.content
 							AND identity_rank.ordinal <= m.ordinal
-					) = $7`,
-				sessionID, pin.sourceUUID, scopedUUID,
+					) = $6`,
+				sessionID, pin.sourceUUID,
 				pin.role, pin.content,
 				pin.sourceIdentityCount, pin.sourceIdentityRank,
 			),

@@ -419,12 +419,6 @@ func TestUsageRowQueryPushesDateBoundsIntoUnion(t *testing.T) {
 	})
 
 	normalized := strings.ToLower(query)
-	// The Devin legacy-uuid CASE embeds an OR inside its session-prefix
-	// predicate; strip the known expression so the no-OR check below still
-	// covers the union's WHERE clauses.
-	normalized = strings.ReplaceAll(normalized,
-		strings.ToLower(devinScopedSourceUUIDSQL(
-			"m.source_uuid", "m.session_id")), "m.source_uuid")
 	assert.NotContains(t, normalized, "and u.ts >=")
 	assert.NotContains(t, normalized, "and u.ts <=")
 	assert.NotContains(t, normalized, " or ")
@@ -5172,85 +5166,6 @@ func TestGetSessionUsage_DedupesBySourceUUIDWhenClaudePairIncomplete(t *testing.
 	requireNoError(t, err, "GetSessionUsage")
 	assert.Equal(t, money.MustParseDollars("0.0175"), u.Cost, "Cost want 0.0175 (deduped)")
 	assert.True(t, u.HasCost, "HasCost = false, want true")
-}
-
-// TestUsageReportsScopeLegacyDevinSourceUUIDs covers rows archived before
-// the parser began scoping Devin source uuids (data version 110): bare
-// node/step ids like "2" are unique only within their own session. Usage
-// report projections must emit the session-scoped "<raw>:<id>" identity
-// the parser now produces, so two Devin sessions sharing bare uuid "2"
-// report distinct usage rows instead of deduplicating into one — under
-// local "devin:<raw>" and remote "host~devin:<raw>" session ids alike —
-// while a non-Devin session keeps its bare uuid.
-func TestUsageReportsScopeLegacyDevinSourceUUIDs(t *testing.T) {
-	d := testDB(t)
-	ctx := context.Background()
-	started := "2026-08-10T08:00:00Z"
-	insertSession(t, d, "devin:sess-a", "proj", func(s *Session) {
-		s.Agent = "devin"
-		s.StartedAt = new(started)
-	})
-	insertSession(t, d, "host~devin:sess-b", "proj", func(s *Session) {
-		s.Agent = "devin"
-		s.StartedAt = new(started)
-	})
-	insertSession(t, d, "host~other:sess-c", "proj", func(s *Session) {
-		s.Agent = "other"
-		s.StartedAt = new(started)
-	})
-	for _, id := range []string{
-		"devin:sess-a", "host~devin:sess-b", "host~other:sess-c",
-	} {
-		insertMessages(t, d, Message{
-			SessionID: id, Ordinal: 0, Role: "assistant",
-			Timestamp: "2026-08-10T09:00:00Z", Model: "devin-model",
-			TokenUsage: jsontext.Value(
-				`{"input_tokens":2,"output_tokens":3}`),
-			SourceUUID: "2",
-		})
-	}
-
-	rowSet, err := d.GetSessionUsageRows(ctx, []string{
-		"devin:sess-a", "host~devin:sess-b", "host~other:sess-c",
-	})
-	require.NoError(t, err)
-	require.Len(t, rowSet.Rows, 3,
-		"sessions sharing a bare Devin uuid must not deduplicate into one row")
-	sourceUUIDBySession := make(map[string]string)
-	for _, row := range rowSet.Rows {
-		sourceUUIDBySession[row.SourceSessionID] = row.SourceUUID
-	}
-	assert.Equal(t, "sess-a:2", sourceUUIDBySession["devin:sess-a"],
-		"bare Devin uuid must project in session-scoped form")
-	assert.Equal(t, "sess-b:2", sourceUUIDBySession["host~devin:sess-b"],
-		"host-prefixed Devin uuid must scope to the raw session id")
-	assert.Equal(t, "2", sourceUUIDBySession["host~other:sess-c"],
-		"non-Devin uuid must pass through unchanged")
-	assert.Empty(t, rowSet.DeduplicatedOutputTokens)
-
-	// The unbounded daily report reads dailyUsageRowsSQLTemplate; the
-	// bounded form reads the timestamp-CTE variant. Both must scope the
-	// bare uuid before building dedup identities, and the facts-backed
-	// public path must agree.
-	for _, filter := range []UsageFilter{
-		{},
-		{From: "2026-08-10", To: "2026-08-10", Timezone: "UTC"},
-	} {
-		legacy, err := d.getDailyUsageLegacy(ctx, filter)
-		require.NoError(t, err)
-		assert.Equal(t, 9, legacy.Totals.OutputTokens,
-			"filter %+v must total output across all three sessions", filter)
-		assert.Equal(t, 3, legacy.SessionCounts.Total,
-			"filter %+v must count all three sessions", filter)
-
-		facts, err := d.GetDailyUsage(ctx, filter)
-		require.NoError(t, err)
-		assert.Equal(t, 9, facts.Totals.OutputTokens,
-			"facts filter %+v must total output across all three sessions",
-			filter)
-		assert.Equal(t, 3, facts.SessionCounts.Total,
-			"facts filter %+v must count all three sessions", filter)
-	}
 }
 
 func TestGetSessionUsage_NoTokenRowsKeepsMetadata(t *testing.T) {

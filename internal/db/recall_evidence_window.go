@@ -33,19 +33,12 @@ func isRecallEvidenceValidationError(err error) bool {
 }
 
 const (
-	recallEvidenceWindowDigestVersion  = "recall-evidence-window/v1"
-	recallEvidenceContentDigestVersion = "recall-evidence-content/v1"
-	// The endpoint lookup accepts two candidate identities: the stored
-	// value and, for a Devin session ('devin:' or host-prefixed
-	// 'host~devin:'), its session-scoped form. Pre-110 archives stored
-	// bare Devin node/step ids; reconciliation must tolerate the legacy
-	// form until it re-stamps endpoints. INDEXED BY keeps the lookup on
-	// the source_uuid index: with an IN list the planner otherwise
-	// prefers the per-session role index.
+	recallEvidenceWindowDigestVersion    = "recall-evidence-window/v1"
+	recallEvidenceContentDigestVersion   = "recall-evidence-content/v1"
 	recallEvidenceOrdinalBySourceUUIDSQL = `
 		SELECT COUNT(*), MIN(ordinal)
-		FROM messages INDEXED BY idx_messages_source_uuid
-		WHERE session_id = ? AND source_uuid IN (?, ?)
+		FROM messages
+		WHERE session_id = ? AND source_uuid = ?
 		  AND source_uuid != ''`
 )
 
@@ -800,22 +793,11 @@ func uniqueRecallEvidenceOrdinalTx(
 	sessionID string,
 	sourceUUID string,
 ) (int, error) {
-	// A bare uuid stored against a Devin session predates session-scoped
-	// source identities (data version 110); its scoped form is the second
-	// lookup candidate. Passing the raw value twice when no scoped form
-	// applies keeps the query shape static. If a bare and a scoped row
-	// ever coexist the lookup reports count=2 and the entry revokes —
-	// the same conservative outcome as before.
-	scopedUUID := sourceUUID
-	if scoped, ok := legacyDevinScopedSourceUUID(sessionID, sourceUUID); ok {
-		scopedUUID = scoped
-	}
 	var count int
 	var ordinal sql.NullInt64
 	if err := tx.QueryRowContext(ctx, recallEvidenceOrdinalBySourceUUIDSQL,
 		sessionID,
 		sourceUUID,
-		scopedUUID,
 	).Scan(&count, &ordinal); err != nil {
 		return -1, fmt.Errorf(
 			"resolving recall evidence source UUID %s: %w",

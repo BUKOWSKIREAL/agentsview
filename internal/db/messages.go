@@ -2495,18 +2495,12 @@ func savePinsTx(tx transactionQueries, sessionID string) ([]savedPin, error) {
 	// Save existing pins before deletion. The ON DELETE CASCADE on
 	// pinned_messages.message_id would otherwise wipe them when
 	// messages are deleted below. source_uuid comes from the joined
-	// message row, translated to the session-scoped form the parser now
-	// emits for pre-110 Devin archives that stored bare node/step ids —
-	// a re-parsed session's rows carry scoped uuids, so the saved pin
-	// must name that form to re-attach. LEFT JOIN keeps pins on legacy
-	// rows whose message_id no longer resolves cleanly. The counts
-	// capture whether source_uuid, or source_uuid plus role and content,
-	// uniquely identify the old message before it is deleted; they stay
-	// on the stored value because the bare→scoped rename is bijective
-	// within a session, so group sizes carry over.
+	// message row; LEFT JOIN keeps pins on legacy rows whose
+	// message_id no longer resolves cleanly. The counts capture whether
+	// source_uuid, or source_uuid plus role and content, uniquely identify
+	// the old message before it is deleted.
 	pinRows, err := tx.Query(`
-		SELECT p.ordinal, COALESCE(
-			`+devinScopedSourceUUIDSQL("m.source_uuid", "m.session_id")+`, ''),
+		SELECT p.ordinal, COALESCE(m.source_uuid, ''),
 			COALESCE(m.role, ''), COALESCE(m.content, ''),
 			CASE WHEN m.id IS NULL THEN 0 ELSE 1 END,
 			(
@@ -2613,15 +2607,6 @@ func restorePinsTx(
 func restorePinBySourceUUIDTx(
 	tx transactionQueries, sessionID string, sp savedPin,
 ) error {
-	// sp.sourceUUID is the single candidate form: savePinsTx already
-	// translates a stored bare Devin uuid to the session-scoped form the
-	// parser now emits, and non-Devin uuids pass through unchanged. The
-	// correlated counts can therefore compare per-candidate
-	// (same_*.source_uuid = m.source_uuid) — every candidate carries the
-	// one bound value, so the per-row count already measures the whole
-	// candidate set. Unlike the PostgreSQL resolver, which matches a pin
-	// against two uuid forms at once, there is no second form a
-	// per-candidate count could miss.
 	if sp.sourceUUIDCount == 1 {
 		res, err := tx.Exec(`
 			INSERT OR IGNORE INTO pinned_messages

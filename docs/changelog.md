@@ -154,7 +154,9 @@ The latest published release is
 
 - Count every Devin session in Usage. Devin numbers its messages per session,
     and AgentsView treated equal numbers in different sessions as duplicates,
-    so later sessions lost most of their tokens. (#1812)
+    so later sessions lost most of their tokens. The next start rewrites the
+    stored Devin message identities once and then runs the usual full resync.
+    (#1812)
 - Session transcripts load again under `duckdb serve`, fixing blank transcripts
     in 0.42.0.
 - Usage reports complete while live sessions continue writing. Summary,

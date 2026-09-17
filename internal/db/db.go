@@ -2946,6 +2946,12 @@ func (db *DB) migrateColumns(ctx context.Context, progress OpenProgressFunc) err
 	if err := db.backfillToolCallFieldsLocked(w); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := scopeLegacyDevinSourceUUIDsLocked(ctx, w); err != nil {
+		return err
+	}
 
 	if _, err := w.ExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS idx_tool_calls_file_path
