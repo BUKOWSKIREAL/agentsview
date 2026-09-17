@@ -3328,7 +3328,12 @@ func resolvePinnedMessageTarget(
 		// form so a pin saved against a bare Devin node/step id
 		// re-attaches after the re-parse restamps rows. Passing the
 		// raw value twice when no scoped form applies keeps the
-		// query shape static.
+		// query shape static. Every uniqueness and multiplicity
+		// count below measures the COMBINED {bare, scoped}
+		// candidate set, not just the form one candidate row
+		// carries: if a bare and a scoped row ever coexist, each
+		// per-row count would look unique and the pin would attach
+		// to whichever row the scan returned first.
 		scopedUUID := pin.sourceUUID
 		if scoped, ok := legacyDevinScopedSourceUUID(
 			sessionID, pin.sourceUUID,
@@ -3346,7 +3351,7 @@ func resolvePinnedMessageTarget(
 							SELECT COUNT(*)
 							FROM messages same_uuid
 							WHERE same_uuid.session_id = m.session_id
-								AND same_uuid.source_uuid = m.source_uuid
+								AND same_uuid.source_uuid IN ($2, $3)
 						) = 1`,
 					sessionID, pin.sourceUUID, scopedUUID,
 				),
@@ -3368,7 +3373,11 @@ func resolvePinnedMessageTarget(
 		// pinned occurrence across shifts caused by rows inserted
 		// before the group. A different count means duplicates were
 		// inserted or removed and the rank no longer identifies an
-		// occurrence, so the pin is dropped.
+		// occurrence, so the pin is dropped. Both counts measure the
+		// combined {bare, scoped} candidate set for the reason given
+		// above: coexisting forms inflate the group past the saved
+		// multiplicity, so the pin drops instead of attaching to an
+		// arbitrary row.
 		target, sourceUUID, ok, err := scanPinnedMessageTarget(
 			tx.QueryRowContext(ctx, `
 				SELECT m.ordinal, m.source_uuid
@@ -3381,7 +3390,7 @@ func resolvePinnedMessageTarget(
 						SELECT COUNT(*)
 						FROM messages same_identity
 						WHERE same_identity.session_id = m.session_id
-							AND same_identity.source_uuid = m.source_uuid
+							AND same_identity.source_uuid IN ($2, $3)
 							AND same_identity.role = m.role
 							AND same_identity.content = m.content
 					) = $6
@@ -3389,7 +3398,7 @@ func resolvePinnedMessageTarget(
 						SELECT COUNT(*)
 						FROM messages identity_rank
 						WHERE identity_rank.session_id = m.session_id
-							AND identity_rank.source_uuid = m.source_uuid
+							AND identity_rank.source_uuid IN ($2, $3)
 							AND identity_rank.role = m.role
 							AND identity_rank.content = m.content
 							AND identity_rank.ordinal <= m.ordinal

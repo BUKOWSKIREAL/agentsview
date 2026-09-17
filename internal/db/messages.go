@@ -2613,6 +2613,15 @@ func restorePinsTx(
 func restorePinBySourceUUIDTx(
 	tx transactionQueries, sessionID string, sp savedPin,
 ) error {
+	// sp.sourceUUID is the single candidate form: savePinsTx already
+	// translates a stored bare Devin uuid to the session-scoped form the
+	// parser now emits, and non-Devin uuids pass through unchanged. The
+	// correlated counts can therefore compare per-candidate
+	// (same_*.source_uuid = m.source_uuid) — every candidate carries the
+	// one bound value, so the per-row count already measures the whole
+	// candidate set. Unlike the PostgreSQL resolver, which matches a pin
+	// against two uuid forms at once, there is no second form a
+	// per-candidate count could miss.
 	if sp.sourceUUIDCount == 1 {
 		res, err := tx.Exec(`
 			INSERT OR IGNORE INTO pinned_messages

@@ -3347,6 +3347,27 @@ const duckUsageMessageEligibility = `
 			AND m.model != '<synthetic>'
 			AND s.deleted_at IS NULL`
 
+// duckDevinScopedMessageSourceUUID translates a stored bare Devin node/step
+// uuid into the session-scoped form the parser now emits ("devin:<raw>"
+// session ids scope "<raw>:<id>"), mirroring the SQLite
+// devinScopedSourceUUIDSQL and PostgreSQL pgDevinScopedMessageSourceUUID
+// fragments so usage dedup keys agree even for mirror rows written by an
+// older binary. Remote sessions carry a "host~devin:<raw>" id; host names
+// cannot contain '~' or ':', so strpos(m.session_id, 'devin:')
+// unambiguously locates the prefix after an optional 'host~'. Every other
+// value passes through untouched. strpos predicates stand in for LIKE
+// patterns so the fragment can embed in fmt.Sprintf templates without
+// percent escapes. Apply it only to selects that feed usage dedup keys;
+// message display lists keep the raw stored value.
+const duckDevinScopedMessageSourceUUID = `CASE
+	WHEN (strpos(m.session_id, 'devin:') = 1
+		OR strpos(m.session_id, '~devin:') > 0)
+		AND m.source_uuid != '' AND strpos(m.source_uuid, ':') = 0
+	THEN substr(m.session_id, strpos(m.session_id, 'devin:') + 6) ||
+		':' || m.source_uuid
+	ELSE m.source_uuid
+END`
+
 // duckUsageMatchingMessageSourceEligibility is the message-only half of
 // duckUsageMessageEligibility with the token-presence requirement removed
 // and the model-presence requirement relaxed to a role check, for
@@ -3403,7 +3424,7 @@ func duckUsageRawSQL(f db.UsageFilter, sessionID string) (string, []any) {
 			m.model AS model, m.provider_id AS provider_id, m.token_usage AS token_json,
 			m.claude_message_id AS claude_message_id,
 			m.claude_request_id AS claude_request_id,
-			m.source_uuid AS source_uuid,
+			`+duckDevinScopedMessageSourceUUID+` AS source_uuid,
 			'' AS usage_dedup_key,
 				0 AS input_tokens, 0 AS output_tokens,
 				0 AS cache_create, 0 AS cache_read,

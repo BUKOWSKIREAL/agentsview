@@ -30,11 +30,16 @@ func legacyDevinScopedSourceUUID(
 // devinLegacyUUIDPredicateSQL selects rows still carrying a bare legacy
 // Devin uuid: the session is Devin — local "devin:<raw>" or remote
 // "host~devin:<raw>" — and the uuid column is non-empty and not yet
-// session-scoped (scoped values contain ':').
+// session-scoped (scoped values contain ':'). Host names cannot contain
+// '~' or ':', so instr(<sessionCol>, 'devin:') unambiguously locates the
+// prefix after an optional 'host~' host prefix. instr predicates stand
+// in for LIKE patterns so the fragment can embed in fmt.Sprintf
+// templates without percent escapes; unlike LIKE they are also
+// case-sensitive, matching legacyDevinScopedSourceUUID.
 func devinLegacyUUIDPredicateSQL(uuidCol, sessionCol string) string {
-	return `(` + sessionCol + ` LIKE 'devin:%' OR ` + sessionCol +
-		` LIKE '%~devin:%') AND ` + uuidCol + ` != '' AND instr(` +
-		uuidCol + `, ':') = 0`
+	return `(instr(` + sessionCol + `, 'devin:') = 1 OR instr(` +
+		sessionCol + `, '~devin:') > 0) AND ` + uuidCol +
+		` != '' AND instr(` + uuidCol + `, ':') = 0`
 }
 
 // devinScopedSourceUUIDSQL translates a stored uuid column to the
