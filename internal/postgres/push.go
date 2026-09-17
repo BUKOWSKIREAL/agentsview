@@ -21,6 +21,7 @@ import (
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/export"
 	"go.kenn.io/agentsview/internal/jsonutil"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 const (
@@ -3299,6 +3300,22 @@ func restorePinnedMessages(
 	return nil
 }
 
+// legacyDevinScopedSourceUUID returns the session-scoped form of a bare
+// Devin source uuid stored by a pre-110 archive: bare Devin node/step ids
+// are only unique per session, and the parser now scopes them as
+// "<raw>:<id>" for "devin:<raw>" session ids (data version 110), including
+// under a remote "host~devin:<raw>" id. A pin snapshotted against the
+// legacy rows names the bare form, so resolution must accept both.
+func legacyDevinScopedSourceUUID(sessionID, uuid string) (string, bool) {
+	_, rawID := parser.StripHostPrefix(sessionID)
+	if !strings.HasPrefix(rawID, "devin:") ||
+		uuid == "" ||
+		strings.Contains(uuid, ":") {
+		return "", false
+	}
+	return strings.TrimPrefix(rawID, "devin:") + ":" + uuid, true
+}
+
 func resolvePinnedMessageTarget(
 	ctx context.Context, tx *sql.Tx, sessionID string,
 	pin savedPostgresPin,
@@ -3307,20 +3324,31 @@ func resolvePinnedMessageTarget(
 		return 0, "", false, nil
 	}
 	if pin.sourceUUID != "" {
+		// The stored uuid is matched alongside its session-scoped
+		// form so a pin saved against a bare Devin node/step id
+		// re-attaches after the re-parse restamps rows. Passing the
+		// raw value twice when no scoped form applies keeps the
+		// query shape static.
+		scopedUUID := pin.sourceUUID
+		if scoped, ok := legacyDevinScopedSourceUUID(
+			sessionID, pin.sourceUUID,
+		); ok {
+			scopedUUID = scoped
+		}
 		if pin.sourceUUIDCount == 1 {
 			target, sourceUUID, ok, err := scanPinnedMessageTarget(
 				tx.QueryRowContext(ctx, `
 					SELECT m.ordinal, m.source_uuid
 					FROM messages m
 					WHERE m.session_id = $1
-						AND m.source_uuid = $2
+						AND m.source_uuid IN ($2, $3)
 						AND (
 							SELECT COUNT(*)
 							FROM messages same_uuid
 							WHERE same_uuid.session_id = m.session_id
 								AND same_uuid.source_uuid = m.source_uuid
 						) = 1`,
-					sessionID, pin.sourceUUID,
+					sessionID, pin.sourceUUID, scopedUUID,
 				),
 			)
 			if err != nil {
@@ -3346,9 +3374,9 @@ func resolvePinnedMessageTarget(
 				SELECT m.ordinal, m.source_uuid
 				FROM messages m
 				WHERE m.session_id = $1
-					AND m.source_uuid = $2
-					AND m.role = $3
-					AND m.content = $4
+					AND m.source_uuid IN ($2, $3)
+					AND m.role = $4
+					AND m.content = $5
 					AND (
 						SELECT COUNT(*)
 						FROM messages same_identity
@@ -3356,7 +3384,7 @@ func resolvePinnedMessageTarget(
 							AND same_identity.source_uuid = m.source_uuid
 							AND same_identity.role = m.role
 							AND same_identity.content = m.content
-					) = $5
+					) = $6
 					AND (
 						SELECT COUNT(*)
 						FROM messages identity_rank
@@ -3365,8 +3393,8 @@ func resolvePinnedMessageTarget(
 							AND identity_rank.role = m.role
 							AND identity_rank.content = m.content
 							AND identity_rank.ordinal <= m.ordinal
-					) = $6`,
-				sessionID, pin.sourceUUID,
+					) = $7`,
+				sessionID, pin.sourceUUID, scopedUUID,
 				pin.role, pin.content,
 				pin.sourceIdentityCount, pin.sourceIdentityRank,
 			),

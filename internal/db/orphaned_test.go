@@ -803,7 +803,9 @@ func TestCopySkipsSanitizeForSanitizedSource(t *testing.T) {
 // their stored source identities are bare Devin node/step ids, which
 // usage dedup would collapse into one global identity across sessions.
 // The copy must restamp them in the session-scoped form the parser now
-// emits; non-Devin sessions and already-scoped uuids pass through.
+// emits — for local "devin:<raw>" sessions and remote
+// "host~devin:<raw>" ones alike; non-Devin sessions and already-scoped
+// uuids pass through.
 func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -829,6 +831,24 @@ func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
 			SourceUUID: "sess-x:9",
 		},
 	)
+	// A remote-synced Devin session stores the same bare node ids
+	// under a host-prefixed session id.
+	insertSession(t, srcDB, "host~devin:sess-h", "proj", func(s *Session) {
+		s.Agent = "devin"
+		s.Machine = "host"
+	})
+	insertMessages(t, srcDB,
+		Message{
+			SessionID: "host~devin:sess-h", Ordinal: 0, Role: "user",
+			Content: "task", ContentLength: 4,
+			SourceUUID: "4",
+		},
+		Message{
+			SessionID: "host~devin:sess-h", Ordinal: 1, Role: "assistant",
+			Content: "working", ContentLength: 7,
+			SourceUUID: "5", SourceParentUUID: "4",
+		},
+	)
 	insertSession(t, srcDB, "sess-y", "proj")
 	insertMessages(t, srcDB,
 		Message{
@@ -842,6 +862,18 @@ func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
 			SourceUUID: "3", SourceParentUUID: "2",
 		},
 	)
+	// A non-Devin remote session keeps its bare ids untouched.
+	insertSession(t, srcDB, "host~other:sess-z", "proj",
+		func(s *Session) {
+			s.Machine = "host"
+		})
+	insertMessages(t, srcDB,
+		Message{
+			SessionID: "host~other:sess-z", Ordinal: 0, Role: "user",
+			Content: "hi", ContentLength: 2,
+			SourceUUID: "2",
+		},
+	)
 	require.NoError(t, srcDB.Close(), "close source")
 
 	dstDB := testDBAtPath(t, filepath.Join(dir, "new.db"), "dst")
@@ -849,7 +881,7 @@ func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
 
 	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
 	require.NoError(t, err, "CopyOrphanedDataFrom")
-	require.Equal(t, 2, count, "expected two orphaned sessions")
+	require.Equal(t, 4, count, "expected four orphaned sessions")
 
 	devinMsgs, err := dstDB.GetMessages(ctx, "devin:sess-x", 0, 10, true)
 	require.NoError(t, err, "GetMessages devin:sess-x")
@@ -862,6 +894,16 @@ func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
 	assert.Equal(t, "sess-x:9", devinMsgs[2].SourceUUID,
 		"already-scoped uuid must not be prefixed again")
 
+	remoteMsgs, err := dstDB.GetMessages(
+		ctx, "host~devin:sess-h", 0, 10, true)
+	require.NoError(t, err, "GetMessages host~devin:sess-h")
+	require.Len(t, remoteMsgs, 2)
+	assert.Equal(t, "sess-h:4", remoteMsgs[0].SourceUUID,
+		"host-prefixed Devin session must scope to the raw id")
+	assert.Equal(t, "sess-h:5", remoteMsgs[1].SourceUUID)
+	assert.Equal(t, "sess-h:4", remoteMsgs[1].SourceParentUUID,
+		"source_parent_uuid must be scoped along with source_uuid")
+
 	otherMsgs, err := dstDB.GetMessages(ctx, "sess-y", 0, 10, true)
 	require.NoError(t, err, "GetMessages sess-y")
 	require.Len(t, otherMsgs, 2)
@@ -869,4 +911,11 @@ func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
 		"non-Devin bare uuid must pass through unchanged")
 	assert.Equal(t, "3", otherMsgs[1].SourceUUID)
 	assert.Equal(t, "2", otherMsgs[1].SourceParentUUID)
+
+	remoteOtherMsgs, err := dstDB.GetMessages(
+		ctx, "host~other:sess-z", 0, 10, true)
+	require.NoError(t, err, "GetMessages host~other:sess-z")
+	require.Len(t, remoteOtherMsgs, 1)
+	assert.Equal(t, "2", remoteOtherMsgs[0].SourceUUID,
+		"non-Devin host-prefixed uuid must pass through unchanged")
 }

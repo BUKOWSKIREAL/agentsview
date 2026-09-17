@@ -2011,62 +2011,85 @@ func TestReplaceSessionMessagesPinSourceUUIDFollowsRow(t *testing.T) {
 // the live re-parse of a Devin session archived before data version
 // 110: stored rows carry bare node ids while the fresh parse emits
 // session-scoped uuids. The pin must re-attach to the scoped row
-// rather than be dropped with the deleted bare-uuid row.
+// rather than be dropped with the deleted bare-uuid row — for local
+// "devin:<raw>" sessions and remote "host~devin:<raw>" ones alike.
+// A non-Devin host-prefixed session gets no translation, so its pin
+// drops when the re-parse stores scoped-looking uuids.
 func TestReplaceSessionMessagesDevinPinSurvivesSourceUUIDRescope(
 	t *testing.T,
 ) {
-	d := testDB(t)
-	ctx := context.Background()
+	tests := []struct {
+		name      string
+		sessionID string
+		wantPin   bool
+	}{
+		{"local devin session", "devin:sess-p", true},
+		{"remote devin session", "host~devin:sess-p", true},
+		{"non-devin host session", "host~other:sess-p", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := testDB(t)
+			ctx := context.Background()
 
-	insertSession(t, d, "devin:sess-p", "p", func(s *Session) {
-		s.Agent = "devin"
-	})
-	insertMessages(t, d,
-		Message{
-			SessionID: "devin:sess-p", Ordinal: 0, Role: "user",
-			Content: "task", Timestamp: tsZero,
-			SourceUUID: "2",
-		},
-		Message{
-			SessionID: "devin:sess-p", Ordinal: 1, Role: "assistant",
-			Content: "working", Timestamp: tsZero,
-			SourceUUID: "3",
-		},
-	)
+			insertSession(t, d, tt.sessionID, "p", func(s *Session) {
+				s.Agent = "devin"
+			})
+			insertMessages(t, d,
+				Message{
+					SessionID: tt.sessionID, Ordinal: 0, Role: "user",
+					Content: "task", Timestamp: tsZero,
+					SourceUUID: "2",
+				},
+				Message{
+					SessionID: tt.sessionID, Ordinal: 1, Role: "assistant",
+					Content: "working", Timestamp: tsZero,
+					SourceUUID: "3",
+				},
+			)
 
-	msgs, err := d.GetAllMessages(ctx, "devin:sess-p")
-	require.NoError(t, err, "GetAllMessages")
-	require.Len(t, msgs, 2)
-	_, err = d.PinMessage("devin:sess-p", msgs[1].ID, nil)
-	require.NoError(t, err, "PinMessage")
+			msgs, err := d.GetAllMessages(ctx, tt.sessionID)
+			require.NoError(t, err, "GetAllMessages")
+			require.Len(t, msgs, 2)
+			_, err = d.PinMessage(tt.sessionID, msgs[1].ID, nil)
+			require.NoError(t, err, "PinMessage")
 
-	// The re-parse stores the same messages under scoped uuids; the
-	// changed uuid forces the full replace path that saves and
-	// restores pins by source identity.
-	require.NoError(t, d.ReplaceSessionMessages("devin:sess-p", []Message{
-		{
-			SessionID: "devin:sess-p", Ordinal: 0, Role: "user",
-			Content: "task", Timestamp: tsZero,
-			SourceUUID: "sess-p:2",
-		},
-		{
-			SessionID: "devin:sess-p", Ordinal: 1, Role: "assistant",
-			Content: "working", Timestamp: tsZero,
-			SourceUUID: "sess-p:3",
-		},
-	}), "ReplaceSessionMessages")
+			// The re-parse stores the same messages under scoped
+			// uuids; the changed uuid forces the full replace path
+			// that saves and restores pins by source identity.
+			require.NoError(t, d.ReplaceSessionMessages(
+				tt.sessionID, []Message{
+					{
+						SessionID: tt.sessionID, Ordinal: 0, Role: "user",
+						Content: "task", Timestamp: tsZero,
+						SourceUUID: "sess-p:2",
+					},
+					{
+						SessionID: tt.sessionID, Ordinal: 1,
+						Role:    "assistant",
+						Content: "working", Timestamp: tsZero,
+						SourceUUID: "sess-p:3",
+					},
+				}), "ReplaceSessionMessages")
 
-	newMsgs, err := d.GetAllMessages(ctx, "devin:sess-p")
-	require.NoError(t, err, "GetAllMessages after replace")
-	require.Len(t, newMsgs, 2)
+			newMsgs, err := d.GetAllMessages(ctx, tt.sessionID)
+			require.NoError(t, err, "GetAllMessages after replace")
+			require.Len(t, newMsgs, 2)
 
-	pins, err := d.ListPinnedMessages(ctx, "devin:sess-p", "")
-	require.NoError(t, err, "ListPinnedMessages")
-	require.Len(t, pins, 1,
-		"pin must survive the bare-to-scoped uuid reparse")
-	assert.Equal(t, 1, pins[0].Ordinal)
-	assert.Equal(t, newMsgs[1].ID, pins[0].MessageID,
-		"pin must re-attach to the scoped message row")
+			pins, err := d.ListPinnedMessages(ctx, tt.sessionID, "")
+			require.NoError(t, err, "ListPinnedMessages")
+			if !tt.wantPin {
+				assert.Empty(t, pins,
+					"a non-Devin session must not translate a bare uuid")
+				return
+			}
+			require.Len(t, pins, 1,
+				"pin must survive the bare-to-scoped uuid reparse")
+			assert.Equal(t, 1, pins[0].Ordinal)
+			assert.Equal(t, newMsgs[1].ID, pins[0].MessageID,
+				"pin must re-attach to the scoped message row")
+		})
+	}
 }
 
 // TestReplaceSessionMessagesPinFallsBackToOrdinal verifies that
@@ -7482,69 +7505,96 @@ func TestCopySessionMetadataFrom_PinsFollowSourceUUID(t *testing.T) {
 // full resync of a Devin session archived before data version 110: the
 // old archive pinned a message by its bare node id while the re-parse
 // stored the session-scoped form. The pin must follow the scoped row
-// instead of being dropped as an unmatched uuid.
+// instead of being dropped as an unmatched uuid — for local
+// "devin:<raw>" sessions and remote "host~devin:<raw>" ones alike. A
+// non-Devin host-prefixed session gets no translation, so a pin on a
+// bare uuid is dropped when the re-parse stores scoped-looking uuids.
 func TestCopySessionMetadataFrom_DevinPinFollowsScopedSourceUUID(
 	t *testing.T,
 ) {
-	dir := t.TempDir()
-	ctx := context.Background()
+	tests := []struct {
+		name      string
+		sessionID string
+		wantPin   bool
+	}{
+		{"local devin session", "devin:sess-x", true},
+		{"remote devin session", "host~devin:sess-x", true},
+		{"non-devin host session", "host~other:sess-x", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ctx := context.Background()
 
-	srcPath := filepath.Join(dir, "src.db")
-	srcDB := testDBAtPath(t, srcPath, "src")
-	insertSession(t, srcDB, "devin:sess-x", "proj", func(s *Session) {
-		s.Agent = "devin"
-	})
-	insertMessages(t, srcDB,
-		Message{
-			SessionID: "devin:sess-x", Ordinal: 0, Role: "user",
-			Content: "task", ContentLength: 4, SourceUUID: "1",
-		},
-		Message{
-			SessionID: "devin:sess-x", Ordinal: 1, Role: "assistant",
-			Content: "working", ContentLength: 7, SourceUUID: "2",
-		},
-	)
-	var msgID int64
-	require.NoError(t, srcDB.getReader().QueryRow(
-		`SELECT id FROM messages
-		 WHERE session_id = 'devin:sess-x' AND ordinal = 1`,
-	).Scan(&msgID), "resolve pinned message")
-	pinID, err := srcDB.PinMessage("devin:sess-x", msgID, nil)
-	require.NoError(t, err, "pin devin message")
-	require.NotZero(t, pinID, "pin not created")
-	require.NoError(t, srcDB.Close(), "close source database")
+			srcPath := filepath.Join(dir, "src.db")
+			srcDB := testDBAtPath(t, srcPath, "src")
+			insertSession(t, srcDB, tt.sessionID, "proj",
+				func(s *Session) {
+					s.Agent = "devin"
+				})
+			insertMessages(t, srcDB,
+				Message{
+					SessionID: tt.sessionID, Ordinal: 0, Role: "user",
+					Content: "task", ContentLength: 4, SourceUUID: "1",
+				},
+				Message{
+					SessionID: tt.sessionID, Ordinal: 1, Role: "assistant",
+					Content: "working", ContentLength: 7, SourceUUID: "2",
+				},
+			)
+			var msgID int64
+			require.NoError(t, srcDB.getReader().QueryRow(
+				`SELECT id FROM messages
+				 WHERE session_id = ? AND ordinal = 1`,
+				tt.sessionID,
+			).Scan(&msgID), "resolve pinned message")
+			pinID, err := srcDB.PinMessage(tt.sessionID, msgID, nil)
+			require.NoError(t, err, "pin devin message")
+			require.NotZero(t, pinID, "pin not created")
+			require.NoError(t, srcDB.Close(), "close source database")
 
-	// Fresh DB: the re-parse stores the same messages under scoped
-	// uuids.
-	dstPath := filepath.Join(dir, "dst.db")
-	dstDB := testDBAtPath(t, dstPath, "dst")
-	defer dstDB.Close()
-	insertSession(t, dstDB, "devin:sess-x", "proj", func(s *Session) {
-		s.Agent = "devin"
-	})
-	insertMessages(t, dstDB,
-		Message{
-			SessionID: "devin:sess-x", Ordinal: 0, Role: "user",
-			Content: "task", ContentLength: 4, SourceUUID: "sess-x:1",
-		},
-		Message{
-			SessionID: "devin:sess-x", Ordinal: 1, Role: "assistant",
-			Content: "working", ContentLength: 7, SourceUUID: "sess-x:2",
-		},
-	)
+			// Fresh DB: the re-parse stores the same messages under
+			// scoped uuids.
+			dstPath := filepath.Join(dir, "dst.db")
+			dstDB := testDBAtPath(t, dstPath, "dst")
+			defer dstDB.Close()
+			insertSession(t, dstDB, tt.sessionID, "proj",
+				func(s *Session) {
+					s.Agent = "devin"
+				})
+			insertMessages(t, dstDB,
+				Message{
+					SessionID: tt.sessionID, Ordinal: 0, Role: "user",
+					Content: "task", ContentLength: 4,
+					SourceUUID: "sess-x:1",
+				},
+				Message{
+					SessionID: tt.sessionID, Ordinal: 1, Role: "assistant",
+					Content: "working", ContentLength: 7,
+					SourceUUID: "sess-x:2",
+				},
+			)
 
-	require.NoError(t, dstDB.CopySessionMetadataFrom(srcPath),
-		"CopySessionMetadataFrom")
+			require.NoError(t, dstDB.CopySessionMetadataFrom(srcPath),
+				"CopySessionMetadataFrom")
 
-	pins, err := dstDB.ListPinnedMessages(ctx, "devin:sess-x", "")
-	require.NoError(t, err, "ListPinnedMessages")
-	require.Len(t, pins, 1,
-		"pin on a legacy bare Devin uuid must survive the resync")
-	assert.Equal(t, 1, pins[0].Ordinal)
-	newMsgs, err := dstDB.GetMessages(ctx, "devin:sess-x", 0, 10, true)
-	require.NoError(t, err, "GetMessages")
-	require.Len(t, newMsgs, 2)
-	assert.Equal(t, newMsgs[1].ID, pins[0].MessageID)
+			pins, err := dstDB.ListPinnedMessages(ctx, tt.sessionID, "")
+			require.NoError(t, err, "ListPinnedMessages")
+			if !tt.wantPin {
+				assert.Empty(t, pins,
+					"a non-Devin session must not translate a bare uuid")
+				return
+			}
+			require.Len(t, pins, 1,
+				"pin on a legacy bare Devin uuid must survive the resync")
+			assert.Equal(t, 1, pins[0].Ordinal)
+			newMsgs, err := dstDB.GetMessages(
+				ctx, tt.sessionID, 0, 10, true)
+			require.NoError(t, err, "GetMessages")
+			require.Len(t, newMsgs, 2)
+			assert.Equal(t, newMsgs[1].ID, pins[0].MessageID)
+		})
+	}
 }
 
 func TestCopySessionMetadataCopiesFromSource(t *testing.T) {

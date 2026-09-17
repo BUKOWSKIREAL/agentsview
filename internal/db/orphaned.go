@@ -1268,17 +1268,14 @@ func (d *DB) CopySessionMetadataFrom(
 		// matchSourceUUID widens a main-side source_uuid comparison so
 		// a bare uuid stored by a pre-110 Devin archive also matches the
 		// session-scoped form the parser now emits ("devin:<raw>"
-		// sessions scope "<raw>:<id>"). Old-side comparisons stay on the
+		// sessions scope "<raw>:<id>", including under a remote
+		// "host~devin:<raw>" id). Old-side comparisons stay on the
 		// raw column: they measure the old group as stored.
 		matchSourceUUID := func(column string) string {
 			return column + ` IN (
 				old_m.source_uuid,
-				CASE WHEN old_m.session_id LIKE 'devin:%'
-						AND old_m.source_uuid != ''
-						AND instr(old_m.source_uuid, ':') = 0
-					THEN substr(old_m.session_id, 7) || ':' ||
-						old_m.source_uuid
-					ELSE old_m.source_uuid END)`
+				` + devinScopedSourceUUIDSQL(
+				"old_m.source_uuid", "old_m.session_id") + `)`
 		}
 		if hasSourceUUID {
 			if _, err := tx.ExecContext(ctx, `
@@ -2060,29 +2057,28 @@ func copySessionDataForIDs(
 
 	// Rows copied verbatim from a pre-110 archive carry bare Devin
 	// node/step ids, but the parser now emits session-scoped source
-	// identities ("devin:<raw>" session ids scope "<raw>:<id>").
-	// Restamp the copied rows so usage dedup sees the same identity a
-	// fresh parse would produce. Already-scoped values (they contain
-	// ':') and non-Devin sessions are left alone, so the rewrite is
-	// idempotent.
+	// identities ("devin:<raw>" session ids scope "<raw>:<id>",
+	// including under a remote "host~devin:<raw>" id). Restamp the
+	// copied rows so usage dedup sees the same identity a fresh parse
+	// would produce. Already-scoped values (they contain ':') and
+	// non-Devin sessions are left alone, so the rewrite is idempotent.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE messages
-		SET source_uuid = substr(session_id, 7) || ':' || source_uuid
+		SET source_uuid = `+devinScopedSourceUUIDSQL(
+		"source_uuid", "session_id")+`
 		WHERE session_id IN (SELECT id FROM `+tempIDsTable+`)
-		  AND session_id LIKE 'devin:%'
-		  AND source_uuid != ''
-		  AND instr(source_uuid, ':') = 0`,
+		  AND (`+devinLegacyUUIDPredicateSQL(
+		"source_uuid", "session_id")+`)`,
 	); err != nil {
 		return fmt.Errorf("scoping copied source uuids: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE messages
-		SET source_parent_uuid =
-			substr(session_id, 7) || ':' || source_parent_uuid
+		SET source_parent_uuid = `+devinScopedSourceUUIDSQL(
+		"source_parent_uuid", "session_id")+`
 		WHERE session_id IN (SELECT id FROM `+tempIDsTable+`)
-		  AND session_id LIKE 'devin:%'
-		  AND source_parent_uuid != ''
-		  AND instr(source_parent_uuid, ':') = 0`,
+		  AND (`+devinLegacyUUIDPredicateSQL(
+		"source_parent_uuid", "session_id")+`)`,
 	); err != nil {
 		return fmt.Errorf("scoping copied source parent uuids: %w", err)
 	}

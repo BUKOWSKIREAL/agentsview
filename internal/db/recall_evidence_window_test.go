@@ -1017,11 +1017,15 @@ func TestRecallEvidenceWriteSessionBatchRemapsStableEndpoints(t *testing.T) {
 // Devin session archived before data version 110: its stored evidence
 // endpoints are bare node ids while the re-parsed messages carry
 // session-scoped uuids. Reconciliation must resolve the legacy form
-// and re-stamp the endpoints rather than revoking the entry; an
-// endpoint that matches no stored or scoped row still revokes.
+// and re-stamp the endpoints rather than revoking the entry — for
+// local "devin:<raw>" sessions and remote "host~devin:<raw>" ones
+// alike; an endpoint that matches no stored or scoped row still
+// revokes, and a non-Devin host-prefixed session gets no translation.
 func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
 	tests := []struct {
 		name          string
+		sessionID     string
+		sourcePrefix  string
 		startUUID     string
 		endUUID       string
 		wantOK        bool
@@ -1031,6 +1035,8 @@ func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
 	}{
 		{
 			name:          "bare legacy endpoints resolve to scoped rows",
+			sessionID:     "devin:sess-r",
+			sourcePrefix:  "sess-r:node",
 			startUUID:     "node-10",
 			endUUID:       "node-11",
 			wantOK:        true,
@@ -1038,21 +1044,46 @@ func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
 			wantEndUUID:   "sess-r:node-11",
 		},
 		{
-			name:       "missing endpoint still revokes",
-			startUUID:  "missing-9",
-			endUUID:    "node-11",
-			wantOK:     false,
-			wantReason: "start_endpoint_unresolved",
+			name:         "missing endpoint still revokes",
+			sessionID:    "devin:sess-r",
+			sourcePrefix: "sess-r:node",
+			startUUID:    "missing-9",
+			endUUID:      "node-11",
+			wantOK:       false,
+			wantReason:   "start_endpoint_unresolved",
+		},
+		{
+			// A remote-synced Devin session resolves the same bare
+			// node ids: the host prefix is stripped before scoping.
+			name:          "host-prefixed devin endpoints resolve",
+			sessionID:     "host~devin:sess-r",
+			sourcePrefix:  "sess-r:node",
+			startUUID:     "node-10",
+			endUUID:       "node-11",
+			wantOK:        true,
+			wantStartUUID: "sess-r:node-10",
+			wantEndUUID:   "sess-r:node-11",
+		},
+		{
+			// A non-Devin remote session gets no translation: bare
+			// endpoints that match nothing revoke as before.
+			name:         "non-devin host session is not translated",
+			sessionID:    "host~other:sess-r",
+			sourcePrefix: "sess-r:node",
+			startUUID:    "node-10",
+			endUUID:      "node-11",
+			wantOK:       false,
+			wantReason:   "start_endpoint_unresolved",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := testDB(t)
 			seedRecallEvidenceWindow(
-				t, d, "devin:sess-r", 10, "sess-r:node", "",
+				t, d, tt.sessionID, 10, tt.sourcePrefix, "",
 			)
 			insertVerifiedRecallSelection(
-				t, d, "m1", "devin:sess-r", 10, 11, []string{"tool-a"},
+				t, d, "m1", tt.sessionID, 10, 11, []string{"tool-a"},
 			)
 
 			// Simulate a pre-110 archive: the stored endpoints are the
@@ -1073,7 +1104,7 @@ func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
 			// content digest ignores timestamps, so evidence that
 			// resolves must survive untouched.
 			messages, err := d.GetAllMessages(
-				context.Background(), "devin:sess-r",
+				context.Background(), tt.sessionID,
 			)
 			require.NoError(t, err)
 			for i := range messages {
@@ -1081,7 +1112,7 @@ func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
 			}
 			logs := captureRecallEvidenceLog(t)
 
-			err = d.ReplaceSessionMessages("devin:sess-r", messages)
+			err = d.ReplaceSessionMessages(tt.sessionID, messages)
 
 			require.NoError(t, err)
 			got := requireRecallEntry(t, d, "m1")
@@ -1099,7 +1130,8 @@ func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
 				assert.False(t, got.ProvenanceOK)
 				assert.Equal(t,
 					"recall: revoked provenance entry=m1 "+
-						"session=devin:sess-r reason="+tt.wantReason,
+						"session="+tt.sessionID+
+						" reason="+tt.wantReason,
 					strings.TrimSpace(logs.String()),
 				)
 			}

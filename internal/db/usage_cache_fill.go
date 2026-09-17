@@ -697,10 +697,16 @@ func boolInt(value bool) int {
 	return 0
 }
 
-const usageFillMessageFactsSQL = `
+// usageFillMessageFactsSQL extracts message facts carrying the
+// session-scoped Devin source identity the parser now emits, so facts
+// deduplicate correctly even for stored rows that still hold bare
+// node/step ids — orphaned-copy imports, remote pushes from an older
+// binary, or anything else that never crossed a translation seam.
+var usageFillMessageFactsSQL = `
 	SELECT m.session_id, m.ordinal, m.role, COALESCE(m.timestamp, ''),
 	       m.model, m.provider_id, m.token_usage, m.claude_message_id,
-	       m.claude_request_id, m.source_uuid
+	       m.claude_request_id, ` + devinScopedSourceUUIDSQL(
+	"m.source_uuid", "m.session_id") + `
 	FROM usage_fill_sessions f
 	CROSS JOIN messages m INDEXED BY idx_messages_usage_session_covering
 	  ON m.session_id = f.session_id

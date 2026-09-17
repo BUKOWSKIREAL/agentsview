@@ -2506,10 +2506,7 @@ func savePinsTx(tx transactionQueries, sessionID string) ([]savedPin, error) {
 	// within a session, so group sizes carry over.
 	pinRows, err := tx.Query(`
 		SELECT p.ordinal, COALESCE(
-			CASE WHEN m.session_id LIKE 'devin:%' AND m.source_uuid != ''
-					AND instr(m.source_uuid, ':') = 0
-				THEN substr(m.session_id, 7) || ':' || m.source_uuid
-				ELSE m.source_uuid END, ''),
+			`+devinScopedSourceUUIDSQL("m.source_uuid", "m.session_id")+`, ''),
 			COALESCE(m.role, ''), COALESCE(m.content, ''),
 			CASE WHEN m.id IS NULL THEN 0 ELSE 1 END,
 			(
