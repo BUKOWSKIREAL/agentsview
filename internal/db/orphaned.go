@@ -1265,6 +1265,21 @@ func (d *DB) CopySessionMetadataFrom(
 		hasSourceUUID := oldDBHasColumn(
 			ctx, tx, "messages", "source_uuid",
 		)
+		// matchSourceUUID widens a main-side source_uuid comparison so
+		// a bare uuid stored by a pre-110 Devin archive also matches the
+		// session-scoped form the parser now emits ("devin:<raw>"
+		// sessions scope "<raw>:<id>"). Old-side comparisons stay on the
+		// raw column: they measure the old group as stored.
+		matchSourceUUID := func(column string) string {
+			return column + ` IN (
+				old_m.source_uuid,
+				CASE WHEN old_m.session_id LIKE 'devin:%'
+						AND old_m.source_uuid != ''
+						AND instr(old_m.source_uuid, ':') = 0
+					THEN substr(old_m.session_id, 7) || ':' ||
+						old_m.source_uuid
+					ELSE old_m.source_uuid END)`
+		}
 		if hasSourceUUID {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT OR IGNORE INTO main.pinned_messages
@@ -1277,7 +1292,7 @@ func (d *DB) CopySessionMetadataFrom(
 					ON old_m.id = op.message_id
 				JOIN main.messages new_m
 					ON new_m.session_id = old_m.session_id
-					AND new_m.source_uuid = old_m.source_uuid
+					AND `+matchSourceUUID("new_m.source_uuid")+`
 				WHERE op.session_id IN (
 					SELECT id FROM main.sessions
 				)
@@ -1285,7 +1300,7 @@ func (d *DB) CopySessionMetadataFrom(
 				AND (
 					SELECT COUNT(*) FROM main.messages x
 					WHERE x.session_id = old_m.session_id
-					AND x.source_uuid = old_m.source_uuid
+					AND `+matchSourceUUID("x.source_uuid")+`
 				) = 1
 				AND (
 					SELECT COUNT(*) FROM old_db.messages y
@@ -1319,7 +1334,7 @@ func (d *DB) CopySessionMetadataFrom(
 					ON old_m.id = op.message_id
 				JOIN main.messages new_m
 					ON new_m.session_id = old_m.session_id
-					AND new_m.source_uuid = old_m.source_uuid
+					AND `+matchSourceUUID("new_m.source_uuid")+`
 					AND new_m.role = old_m.role
 					AND new_m.content = old_m.content
 				WHERE op.session_id IN (
@@ -1335,7 +1350,7 @@ func (d *DB) CopySessionMetadataFrom(
 				) = (
 					SELECT COUNT(*) FROM main.messages x
 					WHERE x.session_id = old_m.session_id
-					AND x.source_uuid = old_m.source_uuid
+					AND `+matchSourceUUID("x.source_uuid")+`
 					AND x.role = old_m.role
 					AND x.content = old_m.content
 				)
@@ -1349,7 +1364,7 @@ func (d *DB) CopySessionMetadataFrom(
 				) = (
 					SELECT COUNT(*) FROM main.messages x2
 					WHERE x2.session_id = old_m.session_id
-					AND x2.source_uuid = old_m.source_uuid
+					AND `+matchSourceUUID("x2.source_uuid")+`
 					AND x2.role = old_m.role
 					AND x2.content = old_m.content
 					AND x2.ordinal <= new_m.ordinal
@@ -2041,6 +2056,35 @@ func copySessionDataForIDs(
 			"WHERE session_id IN (SELECT id FROM "+tempIDsTable+")",
 	); err != nil {
 		return fmt.Errorf("copying messages: %w", err)
+	}
+
+	// Rows copied verbatim from a pre-110 archive carry bare Devin
+	// node/step ids, but the parser now emits session-scoped source
+	// identities ("devin:<raw>" session ids scope "<raw>:<id>").
+	// Restamp the copied rows so usage dedup sees the same identity a
+	// fresh parse would produce. Already-scoped values (they contain
+	// ':') and non-Devin sessions are left alone, so the rewrite is
+	// idempotent.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE messages
+		SET source_uuid = substr(session_id, 7) || ':' || source_uuid
+		WHERE session_id IN (SELECT id FROM `+tempIDsTable+`)
+		  AND session_id LIKE 'devin:%'
+		  AND source_uuid != ''
+		  AND instr(source_uuid, ':') = 0`,
+	); err != nil {
+		return fmt.Errorf("scoping copied source uuids: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE messages
+		SET source_parent_uuid =
+			substr(session_id, 7) || ':' || source_parent_uuid
+		WHERE session_id IN (SELECT id FROM `+tempIDsTable+`)
+		  AND session_id LIKE 'devin:%'
+		  AND source_parent_uuid != ''
+		  AND instr(source_parent_uuid, ':') = 0`,
+	); err != nil {
+		return fmt.Errorf("scoping copied source parent uuids: %w", err)
 	}
 
 	if oldDBHasTable(ctx, tx, "usage_events") {

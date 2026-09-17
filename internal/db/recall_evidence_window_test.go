@@ -253,6 +253,7 @@ func TestRecallEvidenceSourceUUIDLookupUsesPartialIndex(t *testing.T) {
 		"EXPLAIN QUERY PLAN "+recallEvidenceOrdinalBySourceUUIDSQL,
 		"query-plan",
 		"stable-10",
+		"stable-10",
 	)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -1010,6 +1011,100 @@ func TestRecallEvidenceWriteSessionBatchRemapsStableEndpoints(t *testing.T) {
 	require.Len(t, got.Evidence, 1)
 	assert.Equal(t, 11, got.Evidence[0].MessageStartOrdinal)
 	assert.Equal(t, 12, got.Evidence[0].MessageEndOrdinal)
+}
+
+// TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints covers a
+// Devin session archived before data version 110: its stored evidence
+// endpoints are bare node ids while the re-parsed messages carry
+// session-scoped uuids. Reconciliation must resolve the legacy form
+// and re-stamp the endpoints rather than revoking the entry; an
+// endpoint that matches no stored or scoped row still revokes.
+func TestRecallEvidenceReconcileResolvesLegacyDevinEndpoints(t *testing.T) {
+	tests := []struct {
+		name          string
+		startUUID     string
+		endUUID       string
+		wantOK        bool
+		wantReason    string
+		wantStartUUID string
+		wantEndUUID   string
+	}{
+		{
+			name:          "bare legacy endpoints resolve to scoped rows",
+			startUUID:     "node-10",
+			endUUID:       "node-11",
+			wantOK:        true,
+			wantStartUUID: "sess-r:node-10",
+			wantEndUUID:   "sess-r:node-11",
+		},
+		{
+			name:       "missing endpoint still revokes",
+			startUUID:  "missing-9",
+			endUUID:    "node-11",
+			wantOK:     false,
+			wantReason: "start_endpoint_unresolved",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := testDB(t)
+			seedRecallEvidenceWindow(
+				t, d, "devin:sess-r", 10, "sess-r:node", "",
+			)
+			insertVerifiedRecallSelection(
+				t, d, "m1", "devin:sess-r", 10, 11, []string{"tool-a"},
+			)
+
+			// Simulate a pre-110 archive: the stored endpoints are the
+			// bare node ids the parser used to emit.
+			result, err := d.getWriter().Exec(`
+				UPDATE recall_evidence
+				SET message_start_source_uuid = ?,
+				    message_end_source_uuid = ?
+				WHERE entry_id = 'm1'`,
+				tt.startUUID, tt.endUUID,
+			)
+			require.NoError(t, err)
+			rows, err := result.RowsAffected()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, rows)
+
+			// Force reconciliation with a timestamp-only rewrite: the
+			// content digest ignores timestamps, so evidence that
+			// resolves must survive untouched.
+			messages, err := d.GetAllMessages(
+				context.Background(), "devin:sess-r",
+			)
+			require.NoError(t, err)
+			for i := range messages {
+				messages[i].Timestamp = "2026-07-09T13:00:00Z"
+			}
+			logs := captureRecallEvidenceLog(t)
+
+			err = d.ReplaceSessionMessages("devin:sess-r", messages)
+
+			require.NoError(t, err)
+			got := requireRecallEntry(t, d, "m1")
+			require.Len(t, got.Evidence, 1)
+			if tt.wantOK {
+				assert.True(t, got.ProvenanceOK)
+				assert.Equal(t, tt.wantStartUUID,
+					got.Evidence[0].MessageStartSourceUUID,
+					"resolved legacy endpoint must be re-stamped scoped")
+				assert.Equal(t, tt.wantEndUUID,
+					got.Evidence[0].MessageEndSourceUUID)
+				assert.Empty(t, strings.TrimSpace(logs.String()),
+					"resolvable endpoints must not log a revocation")
+			} else {
+				assert.False(t, got.ProvenanceOK)
+				assert.Equal(t,
+					"recall: revoked provenance entry=m1 "+
+						"session=devin:sess-r reason="+tt.wantReason,
+					strings.TrimSpace(logs.String()),
+				)
+			}
+		})
+	}
 }
 
 func seedRecallEvidenceWindow(

@@ -797,3 +797,76 @@ func TestCopySkipsSanitizeForSanitizedSource(t *testing.T) {
 		}
 	}
 }
+
+// TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs covers the
+// resync path for sessions preserved verbatim from a pre-110 archive:
+// their stored source identities are bare Devin node/step ids, which
+// usage dedup would collapse into one global identity across sessions.
+// The copy must restamp them in the session-scoped form the parser now
+// emits; non-Devin sessions and already-scoped uuids pass through.
+func TestCopyOrphanedDataFromScopesLegacyDevinSourceUUIDs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "old.db")
+	srcDB := testDBAtPath(t, srcPath, "src")
+	insertSession(t, srcDB, "devin:sess-x", "proj", func(s *Session) {
+		s.Agent = "devin"
+	})
+	insertMessages(t, srcDB,
+		Message{
+			SessionID: "devin:sess-x", Ordinal: 0, Role: "user",
+			Content: "task", ContentLength: 4,
+			SourceUUID: "1",
+		},
+		Message{
+			SessionID: "devin:sess-x", Ordinal: 1, Role: "assistant",
+			Content: "working", ContentLength: 7,
+			SourceUUID: "2", SourceParentUUID: "1",
+		},
+		Message{
+			SessionID: "devin:sess-x", Ordinal: 2, Role: "assistant",
+			Content: "done", ContentLength: 4,
+			SourceUUID: "sess-x:9",
+		},
+	)
+	insertSession(t, srcDB, "sess-y", "proj")
+	insertMessages(t, srcDB,
+		Message{
+			SessionID: "sess-y", Ordinal: 0, Role: "user",
+			Content: "hi", ContentLength: 2,
+			SourceUUID: "2",
+		},
+		Message{
+			SessionID: "sess-y", Ordinal: 1, Role: "assistant",
+			Content: "ok", ContentLength: 2,
+			SourceUUID: "3", SourceParentUUID: "2",
+		},
+	)
+	require.NoError(t, srcDB.Close(), "close source")
+
+	dstDB := testDBAtPath(t, filepath.Join(dir, "new.db"), "dst")
+	defer dstDB.Close()
+
+	count, err := dstDB.CopyOrphanedDataFrom(srcPath)
+	require.NoError(t, err, "CopyOrphanedDataFrom")
+	require.Equal(t, 2, count, "expected two orphaned sessions")
+
+	devinMsgs, err := dstDB.GetMessages(ctx, "devin:sess-x", 0, 10, true)
+	require.NoError(t, err, "GetMessages devin:sess-x")
+	require.Len(t, devinMsgs, 3)
+	assert.Equal(t, "sess-x:1", devinMsgs[0].SourceUUID)
+	assert.Empty(t, devinMsgs[0].SourceParentUUID)
+	assert.Equal(t, "sess-x:2", devinMsgs[1].SourceUUID)
+	assert.Equal(t, "sess-x:1", devinMsgs[1].SourceParentUUID,
+		"source_parent_uuid must be scoped along with source_uuid")
+	assert.Equal(t, "sess-x:9", devinMsgs[2].SourceUUID,
+		"already-scoped uuid must not be prefixed again")
+
+	otherMsgs, err := dstDB.GetMessages(ctx, "sess-y", 0, 10, true)
+	require.NoError(t, err, "GetMessages sess-y")
+	require.Len(t, otherMsgs, 2)
+	assert.Equal(t, "2", otherMsgs[0].SourceUUID,
+		"non-Devin bare uuid must pass through unchanged")
+	assert.Equal(t, "3", otherMsgs[1].SourceUUID)
+	assert.Equal(t, "2", otherMsgs[1].SourceParentUUID)
+}

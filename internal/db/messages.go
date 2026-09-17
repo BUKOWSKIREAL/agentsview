@@ -2495,12 +2495,21 @@ func savePinsTx(tx transactionQueries, sessionID string) ([]savedPin, error) {
 	// Save existing pins before deletion. The ON DELETE CASCADE on
 	// pinned_messages.message_id would otherwise wipe them when
 	// messages are deleted below. source_uuid comes from the joined
-	// message row; LEFT JOIN keeps pins on legacy rows whose
-	// message_id no longer resolves cleanly. The counts capture whether
-	// source_uuid, or source_uuid plus role and content, uniquely identify
-	// the old message before it is deleted.
+	// message row, translated to the session-scoped form the parser now
+	// emits for pre-110 Devin archives that stored bare node/step ids —
+	// a re-parsed session's rows carry scoped uuids, so the saved pin
+	// must name that form to re-attach. LEFT JOIN keeps pins on legacy
+	// rows whose message_id no longer resolves cleanly. The counts
+	// capture whether source_uuid, or source_uuid plus role and content,
+	// uniquely identify the old message before it is deleted; they stay
+	// on the stored value because the bare→scoped rename is bijective
+	// within a session, so group sizes carry over.
 	pinRows, err := tx.Query(`
-		SELECT p.ordinal, COALESCE(m.source_uuid, ''),
+		SELECT p.ordinal, COALESCE(
+			CASE WHEN m.session_id LIKE 'devin:%' AND m.source_uuid != ''
+					AND instr(m.source_uuid, ':') = 0
+				THEN substr(m.session_id, 7) || ':' || m.source_uuid
+				ELSE m.source_uuid END, ''),
 			COALESCE(m.role, ''), COALESCE(m.content, ''),
 			CASE WHEN m.id IS NULL THEN 0 ELSE 1 END,
 			(
