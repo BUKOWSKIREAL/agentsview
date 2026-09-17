@@ -140,6 +140,7 @@ func TestOpenScopesLegacyDevinSourceUUIDs(t *testing.T) {
 	d.Close()
 	d, err = Open(path)
 	require.NoError(t, err, "second stale reopen")
+	defer d.Close()
 	s, err = d.GetSession(ctx, "host~devin:sess-b")
 	require.NoError(t, err)
 	assert.Equal(t, revisionAfter, *s.TranscriptRevision,
