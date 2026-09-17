@@ -11,7 +11,7 @@ import (
 )
 
 // TestOpenScopesLegacyDevinSourceUUIDs covers an archive written before
-// data version 110: Devin rows store bare node/step ids, which the
+// data version 111: Devin rows store bare node/step ids, which the
 // migration rewrites in place to the session-scoped form the parser now
 // emits. Local and remote Devin sessions are rewritten, already-scoped
 // values and non-Devin sessions are untouched, rewritten sessions get a

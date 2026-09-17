@@ -10,10 +10,10 @@ import (
 // Earlier archives store bare node_id/step_id values, which are only
 // unique within a session and collide across sessions in usage
 // deduplication.
-const devinSourceUUIDScopeVersion = 110
+const devinSourceUUIDScopeVersion = 111
 
 // scopeLegacyDevinSourceUUIDsLocked rewrites stored Devin message source
-// identities from the bare pre-110 form to the session-scoped form the
+// identities from the bare pre-111 form to the session-scoped form the
 // parser now emits, so an archive written by an older binary holds the
 // same values a fresh parse produces. It runs once, before the full
 // resync that the version bump triggers, on archives still below
