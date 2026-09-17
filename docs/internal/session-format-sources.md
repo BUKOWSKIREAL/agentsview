@@ -2355,6 +2355,11 @@ schemas keep their existing ordering behavior.
   match (see `EffortTierBaseModel` in `internal/pricing/normalize.go`). Truly
   opaque names (`adaptive`, `compactor`, `MODEL_PRIVATE_*`, Devin codenames
   such as `claude-5-fable-*`) have no catalog entry and remain unpriced.
+  `message_nodes.node_id` and transcript `step_id` are per-session sequences
+  (`UNIQUE(session_id, node_id)` in the Devin DDL), so message source
+  identities are prefixed with the session id to stay unique under
+  cross-session usage deduplication. Verified against a live Devin CLI
+  database 2026-09-17.
 - **Agentsview:** `internal/parser/devin.go` and
   `internal/parser/devin_provider.go`; metric aliases are implementation
   evidence because the upstream schema is unavailable.

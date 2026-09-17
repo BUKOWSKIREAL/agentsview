@@ -497,7 +497,12 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // header ID, and native Pi sessions with a resolved parent are classified as
 // forks. Re-parse stored native Pi sessions to repair lineage edges and fork
 // classification.)
-const dataVersion = 110
+// (111: Devin message source identities are now session-scoped. Existing
+// Devin rows carry bare node_id/step_id SourceUUIDs that collide across
+// sessions in usage deduplication; a fingerprint change cannot cover this
+// because the source bytes are unchanged, so existing sessions need
+// re-parsing.)
+const dataVersion = 111
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 

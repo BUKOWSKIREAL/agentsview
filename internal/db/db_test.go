@@ -1080,6 +1080,11 @@ func TestCurrentDataVersionClaudeRepoLocalWorktrees(t *testing.T) {
 		"Claude repository-local worktrees must reparse archives from v0.43.0 at data version 108")
 }
 
+func TestCurrentDataVersionDevinSessionScopedSourceUUID(t *testing.T) {
+	assert.GreaterOrEqual(t, CurrentDataVersion(), 110,
+		"Devin rows need re-parsing so usage deduplication receives session-scoped source identities")
+}
+
 func TestCurrentDataVersionAntigravityCLICwdAndWorktreeProject(t *testing.T) {
 	assert.GreaterOrEqual(t, CurrentDataVersion(), 96,
 		"version 96 is the data-version boundary for Antigravity CLI cwd and worktree project recovery")
