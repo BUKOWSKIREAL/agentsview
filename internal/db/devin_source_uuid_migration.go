@@ -27,9 +27,22 @@ const devinSourceUUIDScopeVersion = 111
 // already contain ':' are left alone, so the rewrite is idempotent when
 // startup repeats before the resync completes.
 //
+// Recall evidence endpoints store the same message source_uuid values,
+// so they are rewritten in the same transaction; leaving them bare
+// would make the endpoint lookup miss the scoped rows and revoke
+// trusted evidence on the next resync.
+//
 // Every rewritten session gets a transcript revision bump: source_uuid
 // participates in transcript revision equality, and mirrors use the
 // revision to notice changed rows.
+//
+// PostgreSQL mirrors are deliberately not rewritten here. They are
+// derived stores, and the revision bump makes the next push carry
+// scoped rows. A mirror queried between this rewrite and its next
+// push still holds bare ids and can undercount usage across sessions;
+// closing that window would need a read-time normalization on the
+// PostgreSQL usage path, which is intentionally left out of this
+// migration.
 func scopeLegacyDevinSourceUUIDsLocked(
 	ctx context.Context, w *writerHandle,
 ) error {
@@ -96,6 +109,24 @@ func scopeLegacyDevinSourceUUIDsLocked(
 		  AND instr(source_parent_uuid, ':') = 0`,
 	); err != nil {
 		return fmt.Errorf("scoping devin source parent uuids: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE recall_evidence
+		SET message_start_source_uuid = ` + scoped +
+		`message_start_source_uuid
+		WHERE session_id IN (` + devinSessions + `)
+		  AND message_start_source_uuid != ''
+		  AND instr(message_start_source_uuid, ':') = 0`,
+	); err != nil {
+		return fmt.Errorf("scoping devin recall start uuids: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE recall_evidence
+		SET message_end_source_uuid = ` + scoped +
+		`message_end_source_uuid
+		WHERE session_id IN (` + devinSessions + `)
+		  AND message_end_source_uuid != ''
+		  AND instr(message_end_source_uuid, ':') = 0`,
+	); err != nil {
+		return fmt.Errorf("scoping devin recall end uuids: %w", err)
 	}
 	for _, id := range sessionIDs {
 		if err := bumpTranscriptRevision(tx, id, true); err != nil {
