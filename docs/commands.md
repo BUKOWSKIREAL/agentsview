@@ -723,6 +723,10 @@ endpoint. `session usage`, `token-use`, and `usage statusline` still wait for
 initial sync, including when they reuse a daemon started by daily usage.
 Statusline limits the complete wait and report request to 30 seconds.
 
+Offline reads require an archive at the current data version. If an upgrade
+requires a resync, run `agentsview daemon restart` and let the resync finish
+before retrying the offline command.
+
 ```bash
 agentsview usage daily [flags]
 ```

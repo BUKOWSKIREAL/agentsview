@@ -1749,7 +1749,7 @@ func OpenReadOnly(path string) (*DB, error) {
 		return nil, fmt.Errorf("opening read-only reader: %w", err)
 	}
 
-	schemaStale, _, err := probeDatabaseConn(reader)
+	schemaStale, dataStale, err := probeDatabaseConn(reader)
 	if err != nil {
 		reader.Close()
 		return nil, fmt.Errorf(
@@ -1771,6 +1771,7 @@ func OpenReadOnly(path string) (*DB, error) {
 		path: path, readOnly: true,
 		usageCache: newUsageCacheManager(path),
 	}
+	db.dataStale.Store(dataStale)
 	db.usageCache.attachArchive(db)
 	db.reader.Store(reader)
 	db.cursorSecret = make([]byte, 32)
